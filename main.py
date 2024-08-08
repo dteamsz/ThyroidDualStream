@@ -17,6 +17,8 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("--mode")
 parser.add_argument("--checkpoint", default=None)
+parser.add_argument("--vid", default=None)
+
 args = parser.parse_args()
 print('current mode is {}'.format(args.mode))
 print('current checkpoint is {}'.format(args.checkpoint))
@@ -59,7 +61,15 @@ class TotalModel(nn.Module):
         self.img_feature_extractor = img_feature_extractor
         self.roi_feature_extractor = roi_feature_extractor
         self.mode = mode
-        if mode == 'dual_maxpool':
+        if mode == 'dual_lstm':
+            self.dual_lstm = nn.LSTM(3072, 3072, 1, batch_first=True)
+            self.T_conv = nn.Conv2d(1,1,(64,1),1)
+            self.dual_lstm_fc = nn.Linear(3072,2)
+        elif mode == 'single_lstm':
+            self.single_lstm = nn.LSTM(1536, 1536, 1, batch_first=True)
+            self.T_conv = nn.Conv2d(1,1,(64,1),1)
+            self.single_lstm_fc = nn.Linear(1536,2)
+        elif mode == 'dual_maxpool':
             self.Maxpool = nn.AdaptiveMaxPool2d((1,3072))
             self.dual_maxpool_fc = nn.Linear(3072,2)
         elif mode == 'dual_averagepool':
@@ -83,6 +93,7 @@ class TotalModel(nn.Module):
         x_roi = x_roi.squeeze(0)
         img_feature = self.img_feature_extractor(x_img)
         if 'dual' in self.mode:
+
             roi_feature = self.roi_feature_extractor(x_roi)
             feature = torch.cat((img_feature,roi_feature),1).unsqueeze(0)
             if self.mode == 'dual_maxpool': 
@@ -91,6 +102,8 @@ class TotalModel(nn.Module):
                 result = self.dual_averagepool_fc(self.Averagepool(feature).squeeze(0))
             elif self.mode == 'dual_T_conv':
                 result = self.dual_T_conv_fc(self.T_conv(feature).squeeze(0))
+
+
         elif 'single' in self.mode:
             if self.mode == 'single_maxpool': 
                 result = self.single_maxpool_fc(self.Maxpool(img_feature.unsqueeze(0)).squeeze(0))
@@ -98,6 +111,68 @@ class TotalModel(nn.Module):
                 result = self.single_averagepool_fc(self.Averagepool(img_feature.unsqueeze(0)).squeeze(0))
             elif self.mode == 'single_T_conv':
                 x = self.T_conv(img_feature.unsqueeze(0)).squeeze(0)
+                result = self.single_T_conv_fc(x)
+                
+        # result = F.softmax(result, dim=1)
+        return result
+
+class CAMModel(nn.Module):
+    def __init__(self, img_feature_extractor, roi_feature_extractor=None, mode='dual_lstm'):
+        super(CAMModel, self ).__init__()
+        # 取掉model的后1层
+        self.img_feature_extractor = img_feature_extractor
+        self.roi_feature_extractor = roi_feature_extractor
+        self.mode = mode
+        if mode == 'dual_lstm':
+            self.dual_lstm = nn.LSTM(3072, 3072, 1, batch_first=True)
+            self.T_conv = nn.Conv2d(1,1,(64,1),1)
+            self.dual_lstm_fc = nn.Linear(3072,2)
+        elif mode == 'single_lstm':
+            self.single_lstm = nn.LSTM(1536, 1536, 1, batch_first=True)
+            self.T_conv = nn.Conv2d(1,1,(64,1),1)
+            self.single_lstm_fc = nn.Linear(1536,2)
+        elif mode == 'dual_maxpool':
+            self.Maxpool = nn.AdaptiveMaxPool2d((1,3072))
+            self.dual_maxpool_fc = nn.Linear(3072,2)
+        elif mode == 'dual_averagepool':
+            self.Averagepool = nn.AdaptiveAvgPool2d((1,3072))
+            self.dual_averagepool_fc = nn.Linear(3072,2)
+        elif mode == 'single_maxpool':
+            self.Maxpool = nn.AdaptiveMaxPool2d((1,1536))
+            self.single_maxpool_fc = nn.Linear(1536,2)
+        elif mode == 'single_averagepool':
+            self.Averagepool = nn.AdaptiveAvgPool2d((1,1536))
+            self.single_averagepool_fc = nn.Linear(1536,2)
+        elif mode == 'dual_T_conv':
+            self.T_conv = nn.Conv2d(1,1,(64,1),1)
+            self.dual_T_conv_fc = nn.Linear(3072,2) 
+        elif self.mode == 'single_T_conv':
+            self.T_conv = nn.Conv2d(1,1,(64,1),1)
+            self.single_T_conv_fc = nn.Linear(1536,2) 
+
+    def forward(self, x_img):
+        # x_img = x_img.squeeze(0)
+        # x_roi = x_roi.squeeze(0)
+        img_feature = self.img_feature_extractor(x_img)
+        if 'dual' in self.mode:
+            x_roi = x_img
+            roi_feature = self.roi_feature_extractor(x_roi)
+            feature = torch.cat((img_feature,roi_feature),1).unsqueeze(0)
+            if self.mode == 'dual_maxpool': 
+                result = self.dual_maxpool_fc(self.Maxpool(feature).squeeze(0))
+            elif self.mode == 'dual_averagepool':
+                result = self.dual_averagepool_fc(self.Averagepool(feature).squeeze(0))
+            elif self.mode == 'dual_T_conv':
+                result = self.dual_T_conv_fc(feature)
+
+
+        elif 'single' in self.mode:
+            if self.mode == 'single_maxpool': 
+                result = self.single_maxpool_fc(self.Maxpool(img_feature.unsqueeze(0)).squeeze(0))
+            elif self.mode == 'single_averagepool':
+                result = self.single_averagepool_fc(self.Averagepool(img_feature.unsqueeze(0)).squeeze(0))
+            elif self.mode == 'single_T_conv':
+                x = img_feature
                 result = self.single_T_conv_fc(x)
                 
         # result = F.softmax(result, dim=1)
@@ -330,12 +405,14 @@ def test(checkpoint):
     """
     PREPARE DATA
     """
-    Catadf = pd.read_excel("./Thyroid_Dataset.xlsx")
-    Catadf = Catadf[Catadf['视频类型（干净单个1、不干净单个2、全景3）'].isin([1,2])]
-    Catadf.reset_index(drop=True, inplace=True)
+    # Catadf = pd.read_excel("./Thyroid_Dataset.xlsx")
+    # Catadf = Catadf[Catadf['视频类型（干净单个1、不干净单个2、全景3）'].isin([1,2])]
+    # Catadf.reset_index(drop=True, inplace=True)
 
-    df = Catadf[Catadf['data_usage']=='test']
-    df.reset_index(drop=True, inplace=True)
+    # df = Catadf[Catadf['data_usage']=='test']
+    # df.reset_index(drop=True, inplace=True)
+
+    df = pd.read_excel('./testset.xlsx')
 
     y_pred = []
     y_true = []
@@ -351,6 +428,9 @@ def test(checkpoint):
             rois = read_avi(roi_path)
             rois = delay_pad_avi(rois, st, 64)
             
+            # if self.usage == 'train':
+            #     imgs = self.seq.augment_images(imgs)
+            #     rois = self.seq.augment_images(rois)
             new_imgs = []
             for j in range(len(imgs)):
                 new_imgs.append(cv2.resize(imgs[j],(256,256)))
@@ -364,7 +444,7 @@ def test(checkpoint):
             outs = nn.Softmax(dim=1)(outs)
             pred = outs[0,1].detach().cpu().numpy()
             y_pred.append(pred)
-            y_true.append(df.loc[i, 'malignancy']-1)
+            y_true.append(df.loc[i, 'malignancy'])
 
 
     fig, axes = plt.subplots(nrows=2, ncols=2)
@@ -388,7 +468,7 @@ def test(checkpoint):
     for ID in IDs:
         df_temp = df[df['StudyID'] == ID]
         df_temp.reset_index(drop=True, inplace=True)
-        y_true.append(df_temp['malignancy'][0]-1)
+        y_true.append(df_temp['malignancy'][0])
         y_pred.append(np.mean(df_temp['y_pred']))
     fig, axes = plt.subplots(nrows=2, ncols=2)
     fig.tight_layout(pad=2, w_pad=2.)
@@ -480,7 +560,141 @@ def external_test(checkpoint):
     df['y_pred'] = y_pred
     df.to_excel('./external_test_result_{}.xlsx'.format(args.mode), index=False, header=True)
 
+def plot_auc():
+    df = pd.read_excel('/home/joe/Project/DataSet/Thyroid-heliyon/test_result.xlsx')
+
+    cols = ['DualT','SingleT','DualMax','SingleMax','DualAvg','SingleAvg']
+    colors = ['red','green','blue','orange','purple','indigo']
+    fig, ax = plt.subplots(nrows=1, ncols=1)
+    # fig.tight_layout(pad=2, w_pad=2.)
+    fig.set_figheight(10)
+    fig.set_figwidth(10)
+    ax.plot([0, 1], [0, 1], linestyle='--', lw=2, color='orange', label='Chance', alpha=.8)
+
+    for c in cols:
+        IDs = df['StudyID'].unique()
+        y_true = []
+        y_score = []
+        for ID in IDs:
+            df_temp = df[df['StudyID'] == ID]
+            df_temp.reset_index(drop=True, inplace=True)
+            y_true.append(df_temp['malignancy'][0]-1)
+            y_score.append(np.mean(df_temp[c]))
+        y_true = np.array(y_true)
+        y_score = np.array(y_score)
+        fpr_keras, tpr_keras, thresholds_keras = roc_curve(y_true, y_score)
+        auc_keras = auc(fpr_keras, tpr_keras)
+
+        optimal_idx = np.argmax(tpr_keras - fpr_keras)
+        optimal_threshold = thresholds_keras[optimal_idx]
+
+        ci = get_CI(y_true, y_score)
+
+        sns.set_style('ticks')
+        #    plt.figure()
+        ax.plot(fpr_keras, tpr_keras, color=colors[cols.index(c)], lw=2,
+                label='{} AUC = {:.3f}, \n95% C.I. = [{:.3f}, {:.3f}]'.format(c, auc_keras, ci[0], ci[1]), alpha=.8)
+    ax.scatter(0.065, 0.884, marker='*', color='purple', s=200, label='experienced')
+
+    ax.scatter(0.120, 0.837, marker='*', color='green', s=200, label='senior')
+
+    ax.scatter(0.109, 0.697, marker='*', color='blue', s=200, label='junior')
+
+    ax.set_xlabel('1 - Specificity', fontsize=16, fontweight='bold')
+    ax.set_ylabel('Sensitivity', fontsize=16, fontweight='bold')
+    ax.xaxis.set_tick_params(labelsize=16)
+    ax.yaxis.set_tick_params(labelsize=16)
+    ax.set_ylim(0, 1)
+    ax.set_xlim(0, 1)
+    ax.set_title('Reciver Operating Characteristics', fontsize=16, fontweight='bold')
+    ax.legend(fontsize=12, loc='lower right')
+    ax.grid()
+
+    # thresh = get_auc(axes[0,0], np.array(y_true), np.array(y_pred), title='ROC')
+    # print(thresh)
+    # # thresh = 0.5
+    # get_precision_recall(axes[0, 1], np.array(y_true), np.array(y_pred), title='PR')
+    # y_pred_lvl = [1 if y>thresh else 0 for y in y_pred]
+    # cm = confusion_matrix(y_true,y_pred_lvl)
+    # plot_confusion_matrix(axes[1,0], cm,target_names=['0','1'],normalize=False)
+    # plot_confusion_matrix(axes[1,1], cm,target_names=['0','1'],normalize=True)
+    fig.figure.savefig('ROC curve comparasion.png')
+
+def grad_cam(checkpoint=None):
+    from pytorch_grad_cam import GradCAM, ScoreCAM, GradCAMPlusPlus, AblationCAM, XGradCAM, EigenCAM
+    from pytorch_grad_cam.utils.image import show_cam_on_image, deprocess_image, preprocess_image
+    from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
+    import cv2
+    import numpy as np
+    import torchvision
+    import torch
+    from PIL import Image
+    import matplotlib.pyplot as plt
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    feature_extractor = Feature_Extractor(timm.create_model('inception_resnet_v2', in_chans=1, num_classes=2))
+    state_dict = torch.load('./ckpt/feature_extraction_inception-resnetv2.pt', map_location='cuda:0')
+    feature_extractor.load_state_dict(state_dict)
+    model = CAMModel(feature_extractor, feature_extractor, mode=args.mode)
+    if checkpoint is None:
+        model.load_state_dict(torch.load('./ckpt/best_checkpoint_{}.pt'.format(args.mode), map_location='cuda:0'))
+    else:
+        model.load_state_dict(torch.load(checkpoint, map_location='cuda:0'))
+    model = model.to(device)
+
+    # with torch.no_grad():
+    img_path = args.vid
+    roi_path = img_path.replace('.avi','_OD.avi')
+    st = 0
+    imgs = read_avi(img_path)
+    imgs = delay_pad_avi(imgs, st, 64)
+    rois = read_avi(roi_path)
+    rois = delay_pad_avi(rois, st, 64)
+    rois_cp = rois.copy()
+    new_imgs = []
+    for j in range(len(imgs)):
+        new_imgs.append(cv2.resize(imgs[j],(256,256)))
+    new_imgs = np.asarray(new_imgs)
+    imgs = torch.from_numpy(new_imgs).float()/255
+    imgs = imgs.unsqueeze(1)
+    rois = torch.from_numpy(rois).float()/255
+    rois = rois.unsqueeze(1)
+    imgs, rois = imgs.to(device), rois.to(device)
+    targets = None
+    if args.mode == 'dual_T_conv':
+        target_layer = [model.img_feature_extractor.model_layer[14]]
+        cam = GradCAM(model=model, target_layers=target_layer)
+        for i in range(64):
+            grayscale_cam = cam(input_tensor=imgs[i].unsqueeze(0), targets=targets)
+            grayscale_cam = grayscale_cam[0,:]
+            cv2.imwrite('./heatmaps/grad_cam_{}_raw.jpg'.format(i), new_imgs[i])
+            img = cv2.cvtColor(new_imgs[i], cv2.COLOR_GRAY2BGR)/255
+            cam_image = show_cam_on_image(img, grayscale_cam, use_rgb=True)
+            cv2.imwrite('./heatmaps/grad_cam_{}.jpg'.format(i), cam_image)
+
+        target_layer = [model.roi_feature_extractor.model_layer[14]]
+        cam = GradCAM(model=model, target_layers=target_layer)
+        for i in range(64):
+            grayscale_cam = cam(input_tensor=rois[i].unsqueeze(0), targets=targets)
+            grayscale_cam = grayscale_cam[0,:]
+            cv2.imwrite('./heatmaps/grad_cam_{}_roi.jpg'.format(i), rois_cp[i])
+            img = cv2.cvtColor(rois_cp[i], cv2.COLOR_GRAY2BGR)/255
+            cam_image = show_cam_on_image(img, grayscale_cam, use_rgb=True)
+            cv2.imwrite('./heatmaps/grad_cam_{}_roimap.jpg'.format(i), cam_image)
+    elif args.mode == 'single_T_conv':
+        target_layer = [model.img_feature_extractor.model_layer[14]]
+        cam = GradCAM(model=model, target_layers=target_layer)
+        for i in range(64):
+            grayscale_cam = cam(input_tensor=imgs[i].unsqueeze(0), targets=targets)
+            grayscale_cam = grayscale_cam[0,:]
+            img = cv2.cvtColor(new_imgs[i], cv2.COLOR_GRAY2BGR)/255
+            cam_image = show_cam_on_image(img, grayscale_cam, use_rgb=True)
+            cv2.imwrite('./heatmaps/grad_cam_{}_single.jpg'.format(i), cam_image)
+
+
+
 if __name__ == '__main__':
     # train()
     test(args.checkpoint)
     # external_test(args.checkpoint)
+    # plot_auc()
+    # grad_cam(args.checkpoint)
